@@ -15,7 +15,7 @@ import errno
 import urllib.request
 import logging
 
-from typing import List, Tuple, Any
+from typing import List, Tuple, Any, Dict
 import threading
 from threading import Lock, Event
 
@@ -29,6 +29,7 @@ DEFAULT_DOH = "cloudflare-dns.com"
 DEFAULT_PORT = 5053
 DEFAULT_ADDR = "0.0.0.0"
 DEFAULT_RESOLVERS = 10
+DEFAULT_LOGGER = "doh"
 
 
 class DohQueue():
@@ -76,6 +77,7 @@ class DohAnswer():
     type: int
     ttl: int
     ip: str
+    ts: float = time.time()
 
     def __repr__(self) -> str:
         return f"ttl={self.ttl} ip={self.ip}"
@@ -90,29 +92,36 @@ class DohConnection():
         self.server = server
         self.headers = {"accept": "application/dns-json"}
         self.conn = http.client.HTTPSConnection(server, 443)
+        self.logger = logging.getLogger(DEFAULT_LOGGER)
 
     def resolve(self, name: str, type: str = "A") -> List[DohAnswer]:
 
         info_list: List[DohAnswer] = []
 
-        print("Hello from tid=", threading.get_ident())
+        try:
+            url = f"https://{self.server}/dns-query?name={name}&type={type}"
+            self.conn.request("GET", url, "", self.headers)
+            response = self.conn.getresponse()
+            json_str = response.read().decode("utf-8")
+            response_dict = json.loads(json_str)
 
-        url = f"https://{self.server}/dns-query?name={name}&type={type}"
-        self.conn.request("GET", url, "", self.headers)
-        response = self.conn.getresponse()
-        json_str = response.read().decode("utf-8")
-        response_dict = json.loads(json_str)
-
-        if("Answer" in response_dict):
-            for entry in response_dict["Answer"]:
-                if(entry["type"] != 1):
-                    continue
-                e_name = entry["name"]
-                e_type = entry["type"]
-                e_ttl = entry["TTL"]
-                e_ip = entry["data"]
-                answer = DohAnswer(e_name, e_type, e_ttl, e_ip)
-                info_list.append(answer)
+            if("Answer" in response_dict):
+                for entry in response_dict["Answer"]:
+                    if(entry["type"] != 1):
+                        continue
+                    e_name = entry["name"]
+                    e_type = entry["type"]
+                    #
+                    # Adding an hour for TTL. Some are using very small
+                    # value and it doesn't make sense to ask the server
+                    # that often
+                    #
+                    e_ttl = entry["TTL"] + 3600
+                    e_ip = entry["data"]
+                    answer = DohAnswer(e_name, e_type, e_ttl, e_ip)
+                    info_list.append(answer)
+        except Exception as e:
+            logger.exception(e)
 
         return info_list
 
@@ -196,7 +205,16 @@ class DohCache():
 
     def __init__(self) -> None:
         self.mutex = Lock()
-        self.cache = {}
+        self.cache:Dict[str,List[DohAnswer]] = {}
+        self.logger = logging.getLogger(DEFAULT_LOGGER)
+
+    def _expired(self, items:List[DohAnswer] ) -> bool:
+        cur_ts = time.time()
+        expired_ts = items[0].ts + items[0].ttl
+
+        if(expired_ts > cur_ts):
+            return False
+        return True
 
     def query(self, name: str) -> List[DohAnswer]:
 
@@ -204,7 +222,12 @@ class DohCache():
 
         try:
             if(name in self.cache):
-                return self.cache[name]
+                if(False == self._expired(self.cache[name])):
+                    return self.cache[name]
+                else:
+                    self.logger.info(f"{name} is expired")
+                    del self.cache[name]
+
         finally:
             self.mutex.release()
 
@@ -215,8 +238,11 @@ class DohCache():
         self.mutex.acquire()
 
         try:
-            ts = time.time()
-            self.cache[name] = answers
+            if(len(answers)>0):
+                self.cache[name] = answers
+            else:
+                if(name in self.cache):
+                    del self.cache[name]
         finally:
             self.mutex.release()
 
@@ -226,7 +252,7 @@ class DnsServer():
     def __init__(self, resolver: DohResolver, addr: Tuple[str, int]) -> None:
         self.addr = addr
         self.resolver = resolver
-        self.logger = logging.getLogger("doh")
+        self.logger = logging.getLogger(DEFAULT_LOGGER)
 
     def __enter__(self) -> Any:
         self.cache = DohCache()
@@ -286,11 +312,13 @@ class DnsServer():
                             response = self._request_handler(data)
                             self.socket.sendto(response, client)
                         except Exception as e:
-                            print(e)
+                            self.logger.exception(e)
                     else:
                         pass  # Nothing to read
                 else:
                     pass  # Probably a timeout
+        except Exception as e:
+            self.logger.exception(e)
         except KeyboardInterrupt:
             pass
 
@@ -339,7 +367,7 @@ def main() -> int:
                         datefmt='%H:%M:%S',
                         level=logging.DEBUG)
 
-    logger = logging.getLogger("doh")
+    logger = logging.getLogger(DEFAULT_LOGGER)
     logger.info("Server started")
 
     #
