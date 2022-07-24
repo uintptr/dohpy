@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-from asyncio.log import logger
 from dataclasses import dataclass
+
 import sys
 import os
 import argparse
@@ -9,15 +9,14 @@ import socket
 import select
 import http.client
 import json
-from syslog import LOG_AUTH, LOG_INFO
 import time
-import errno
-import urllib.request
 import logging
-
+import errno
+from multiprocessing import Queue
 from typing import List, Tuple, Any, Dict
 import threading
 from threading import Lock, Event
+
 
 try:
     from dnslib import DNSRecord, QTYPE, DNSHeader, RR, A
@@ -32,45 +31,6 @@ DEFAULT_RESOLVERS = 10
 DEFAULT_LOGGER = "doh"
 
 
-class DohQueue():
-
-    def __init__(self) -> None:
-        self.mutex = Lock()
-        self.event = Event()
-        self.queue = []
-        self.quit = Event()
-
-    def close(self) -> None:
-        self.quit.set()
-
-    def put(self, item) -> None:
-        self.mutex.acquire()
-
-        try:
-            self.queue.append(item)
-        finally:
-            self.mutex.release()
-
-        self.event.set()
-
-    def get(self, timeout=1) -> Any:
-
-        item = None
-
-        while (None == item and False == self.quit.is_set()):
-            self.event.wait(timeout)
-
-            if(False == self.quit.is_set()):
-                self.mutex.acquire()
-                try:
-                    if(len(self.queue) > 0):
-                        item = self.queue.pop()
-                finally:
-                    self.mutex.release()
-
-        return item
-
-
 @dataclass
 class DohAnswer():
     name: str
@@ -80,7 +40,7 @@ class DohAnswer():
     ts: float = time.time()
 
     def __repr__(self) -> str:
-        return f"ttl={self.ttl} ip={self.ip}"
+        return f"{self.ip}"
 
     def __str__(self) -> str:
         return "hello"
@@ -91,8 +51,22 @@ class DohConnection():
     def __init__(self, server: str) -> None:
         self.server = server
         self.headers = {"accept": "application/dns-json"}
-        self.conn = http.client.HTTPSConnection(server, 443)
+
         self.logger = logging.getLogger(DEFAULT_LOGGER)
+
+    def __enter__(self) -> Any:
+        self.conn = http.client.HTTPSConnection(self.server, 443)
+        return self
+
+    def __exit__(self, exc_type, exc_value, tb) -> bool:
+
+        try:
+            self.conn.close()
+        finally:
+            if(None != exc_type):
+                raise(exc_value)
+
+        return True
 
     def resolve(self, name: str, type: str = "A") -> List[DohAnswer]:
 
@@ -121,7 +95,7 @@ class DohConnection():
                     answer = DohAnswer(e_name, e_type, e_ttl, e_ip)
                     info_list.append(answer)
         except Exception as e:
-            logger.exception(e)
+            self.logger.exception(e)
 
         return info_list
 
@@ -145,70 +119,14 @@ class ResolveItem():
         return f"{self.name}"
 
 
-def resolver_thread(queue: DohQueue, server: str, quit: Event) -> None:
-
-    r = DohConnection(server)
-
-    while(False == quit.is_set()):
-        item: ResolveItem = queue.get()
-        if(None != item):
-            item.answers = r.resolve(item.name)
-            item.signal()
-
-
-class DohResolver():
-
-    def __init__(self, server: str, thread_count: int):
-        self.server = server
-        self.thread_count = thread_count
-        self.threads = []
-
-    def __enter__(self) -> Any:
-        self.quit = Event()
-        self.queue = DohQueue()
-
-        thread_args = (self.queue, self.server, self.quit)
-
-        for _ in range(self.thread_count):
-            t = threading.Thread(target=resolver_thread, args=thread_args)
-            t.start()
-            self.threads.append(t)
-
-        return self
-
-    def __exit__(self, exc_type, exc_value, tb) -> bool:
-
-        try:
-            self.queue.close()
-            self.quit.set()
-            #
-            # Join resolvers
-            #
-            for i in range(self.thread_count):
-                self.threads[i].join()
-
-        finally:
-            if(None != exc_type):
-                raise exc_value
-
-        return True
-
-    def resolve(self, name: str) -> List[DohAnswer]:
-        item = ResolveItem(name)
-        self.queue.put(item)
-        if ( True == item.wait()):
-            return item.answers
-        return []
-
-
 class DohCache():
 
     def __init__(self) -> None:
         self.mutex = Lock()
-        self.cache:Dict[str,List[DohAnswer]] = {}
+        self.cache: Dict[str, List[DohAnswer]] = {}
         self.logger = logging.getLogger(DEFAULT_LOGGER)
 
-    def _expired(self, items:List[DohAnswer] ) -> bool:
+    def _expired(self, items: List[DohAnswer]) -> bool:
         cur_ts = time.time()
         expired_ts = items[0].ts + items[0].ttl
 
@@ -233,12 +151,12 @@ class DohCache():
 
         return []
 
-    def update(self, name:str, answers:List[DohAnswer]) -> None:
+    def update(self, name: str, answers: List[DohAnswer]) -> None:
 
         self.mutex.acquire()
 
         try:
-            if(len(answers)>0):
+            if(len(answers) > 0):
                 self.cache[name] = answers
             else:
                 if(name in self.cache):
@@ -247,11 +165,147 @@ class DohCache():
             self.mutex.release()
 
 
+class DohRequestThread(threading.Thread):
+
+    def __init__(self, server: str, req_queue: Queue, res_queue: Queue, cache: DohCache) -> None:
+        self.req_queue = req_queue
+        self.res_queue = res_queue
+        self.cache = cache
+        self.server = server
+        self.logger = logging.getLogger(DEFAULT_LOGGER)
+        self.quit_signal = False
+        super().__init__()
+
+    def signal_quit(self) -> None:
+        self.quit_signal = True
+
+    def _process_query(self, con: DohConnection, data: bytes) -> bytes:
+
+        request = DNSRecord.parse(data)
+        response = DNSRecord(DNSHeader(id=request.header.id,
+                                       qr=1, aa=1, ra=1), q=request.q)
+
+        qname = str(request.q.qname)
+        qtype = QTYPE[request.q.qtype]
+
+        # cahed ?
+        answers = self.cache.query(qname)
+
+        if(len(answers) > 0):
+            cached = True
+        else:
+            cached = False
+            answers = con.resolve(qname)
+            self.cache.update(qname, answers)
+
+        self.logger.info(f"{qtype:<6} {qname} -> {answers} cached={cached}")
+
+        if(0 != len(answers)):
+            for a in answers:
+                responde_data = RR(qname,
+                                   rtype=a.type,
+                                   ttl=a.ttl,
+                                   rdata=A(a.ip))
+                response.add_answer(responde_data)
+
+        return response.pack()
+
+    def run(self) -> None:
+
+        with DohConnection(self.server) as con:
+            try:
+                while(False == self.quit_signal):
+                    (request, client) = self.req_queue.get()
+                    if(None != request):
+                        response = self._process_query(con, request)
+                        self.res_queue.put((response, client))
+                    else:
+                        # None = quit
+                        break
+            except Exception as e:
+                self.logger.exception(e)
+
+
+class DohResponseThread(threading.Thread):
+
+    def __init__(self, socket: socket.socket, res_queue: Queue) -> None:
+        self.queue = res_queue
+        self.socket = socket
+        self.logger = logging.getLogger(DEFAULT_DOH)
+        super().__init__()
+
+    def run(self) -> None:
+
+        while(True):
+            try:
+                (response, client) = self.queue.get()
+
+                if(None == response):
+                    break
+                self.socket.sendto(response, client)
+            except Exception as e:
+                self.logger.exception(e)
+
+
+class DohQueue():
+
+    def __init__(self, socket: socket.socket, doh_server: str, thread_count: int) -> None:
+        self.server = doh_server
+        self.thread_count = thread_count
+        self.threads: List[DohRequestThread] = []
+        self.cache = DohCache()
+        self.socket = socket
+        self.logger = logging.getLogger(DEFAULT_DOH)
+
+    def put(self, request: bytes, client: Tuple[str, int]) -> None:
+        self.req_queue.put((request, client))
+
+    def get(self) -> Tuple[bytes, Tuple[str, int]]:
+        return self.res_queue.get()
+
+    def __enter__(self) -> Any:
+
+        self.req_queue = Queue()
+        self.res_queue = Queue()
+
+        self.dequeue_thread = DohResponseThread(self.socket, self.res_queue)
+        self.dequeue_thread.start()
+
+        for _ in range(self.thread_count):
+            t = DohRequestThread(self.server, self.req_queue,
+                                 self.res_queue, self.cache)
+            t.start()
+            self.threads.append(t)
+        return self
+
+    def __exit__(self, exc_type, exc_value, tb) -> bool:
+
+        for i in range(self.thread_count):
+            self.threads[i].signal_quit()
+            self.req_queue.put((None, None))
+
+        for i in range(self.thread_count):
+            self.threads[i].join()
+
+        self.res_queue.put((None, None))
+
+        self.dequeue_thread.join()
+
+        self.req_queue.close()
+        self.res_queue.close()
+
+        if(None != exc_value):
+            raise exc_value
+
+        return True
+
+
 class DnsServer():
 
-    def __init__(self, resolver: DohResolver, addr: Tuple[str, int]) -> None:
+    def __init__(self, addr: Tuple[str, int], server: str, thread_count: int) -> None:
         self.addr = addr
-        self.resolver = resolver
+        self.server = server
+        self.thread_count = thread_count
         self.logger = logging.getLogger(DEFAULT_LOGGER)
 
     def __enter__(self) -> Any:
@@ -266,60 +320,30 @@ class DnsServer():
             raise exc_value
         return True
 
-    def _request_handler(self, data: bytes) -> bytes:
-
-        request = DNSRecord.parse(data)
-        response = DNSRecord(DNSHeader(id=request.header.id,
-                                       qr=1, aa=1, ra=1), q=request.q)
-
-        qname = str(request.q.qname)
-        qtype = QTYPE[request.q.qtype]
-
-        # cahed ?
-        answers = self.cache.query(qname)
-
-        if(len(answers) > 0 ):
-            cached = True
-        else:
-            cached = False
-            answers = self.resolver.resolve(qname)
-            self.cache.update(qname, answers)
-
-        self.logger.info(f"{qtype:<6} {qname} -> {answers} cached={cached}")
-
-        if(0 != len(answers)):
-            for a in answers:
-                responde_data = RR( qname,
-                                    rtype=a.type,
-                                    ttl=a.ttl,
-                                    rdata=A(a.ip))
-                response.add_answer(responde_data)
-
-        return response.pack()
-
     def loop(self) -> None:
 
         self.socket.bind(self.addr)
         self.socket.setblocking(False)
 
         try:
-            while(True):
-                r, _, _ = select.select([self.socket], [], [], 5)
-                if(len(r) > 0):
-                    data, client = self.socket.recvfrom(4096)
-                    if(len(data) > 0):
-                        try:
-                            response = self._request_handler(data)
-                            self.socket.sendto(response, client)
-                        except Exception as e:
-                            self.logger.exception(e)
+            with DohQueue(self.socket, self.server, self.thread_count) as q:
+                while(True):
+                    r, _, _ = select.select([self.socket], [], [], 5)
+                    if(len(r) > 0):
+                        data, client = self.socket.recvfrom(4096)
+                        if(len(data) > 0):
+                            try:
+                                q.put(data, client)
+                            except Exception as e:
+                                self.logger.exception(e)
+                        else:
+                            pass  # Nothing to read
                     else:
-                        pass  # Nothing to read
-                else:
-                    pass  # Probably a timeout
+                        pass  # Probably a timeout
         except Exception as e:
             self.logger.exception(e)
         except KeyboardInterrupt:
+            self.logger.info("User interrupted")
             pass
 
 
@@ -374,19 +398,18 @@ def main() -> int:
     # Work
     #
     try:
-        with DohResolver(args.doh_server, args.resolver_threads) as r:
-            addr = (args.addr, args.port)
-            with DnsServer(r, addr) as server:
-                server.loop()
+        with DnsServer((args.addr, args.port),
+                       args.doh_server,
+                       args.resolver_threads) as server:
+            server.loop()
         status = 0
-    except PermissionError as e:
+    except PermissionError:
         print(f"Error: Permission failure binding port {args.port}")
     except OSError as e:
         if(errno.EADDRINUSE == e.errno):
             print(f"Error: port {args.port} already bound")
         else:
             raise e
-
     return status
 
 
