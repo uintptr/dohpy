@@ -351,7 +351,7 @@ def main() -> int:
 
     parser.add_argument("--resolver-threads",
                         default=DEFAULT_RESOLVERS,
-                        type=str,
+                        type=int,
                         required=False,
                         help=f"Resolver threads Default: {DEFAULT_RESOLVERS}")
 
