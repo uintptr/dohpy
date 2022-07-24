@@ -24,7 +24,7 @@ except ImportError:
     print("dnslib is missing")
     sys.exit(1)
 
-DEFAULT_DOH = "cloudflare-dns.com"
+DEFAULT_DOH = "dns.quad9.net:5053"
 DEFAULT_PORT = 5053
 DEFAULT_ADDR = "0.0.0.0"
 DEFAULT_RESOLVERS = 10
@@ -49,13 +49,19 @@ class DohAnswer():
 class DohConnection():
 
     def __init__(self, server: str) -> None:
-        self.server = server
+        if(":" in server):
+            (addr, port) = server.split(":")
+            self.addr = addr
+            self.port = int(port)
+        else:
+            self.addr = server
+            self.port = 443
         self.headers = {"accept": "application/dns-json"}
 
         self.logger = logging.getLogger(DEFAULT_LOGGER)
 
     def __enter__(self) -> Any:
-        self.conn = http.client.HTTPSConnection(self.server, 443)
+        self.conn = http.client.HTTPSConnection(self.addr, self.port)
         return self
 
     def __exit__(self, exc_type, exc_value, tb) -> bool:
@@ -73,7 +79,7 @@ class DohConnection():
         info_list: List[DohAnswer] = []
 
         try:
-            url = f"https://{self.server}/dns-query?name={name}&type={type}"
+            url = f"https://{self.addr}/dns-query?name={name}&type={type}"
             self.conn.request("GET", url, "", self.headers)
             response = self.conn.getresponse()
             json_str = response.read().decode("utf-8")
