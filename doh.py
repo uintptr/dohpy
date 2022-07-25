@@ -13,6 +13,7 @@ import time
 import logging
 import errno
 import threading
+import urllib.parse
 
 from typing import List, Tuple, Any, Dict
 from queue import Queue
@@ -23,7 +24,7 @@ except ImportError:
     print("dnslib is missing")
     sys.exit(1)
 
-DEFAULT_DOH = "dns.quad9.net:5053"
+DEFAULT_DOH = "https://dns.quad9.net:5053/dns-query"
 DEFAULT_PORT = 5053
 DEFAULT_ADDR = "0.0.0.0"
 DEFAULT_RESOLVERS = 20
@@ -49,20 +50,22 @@ class DohAnswer():
 
 class DohConnection():
 
-    def __init__(self, server: str) -> None:
-        if(":" in server):
-            (addr, port) = server.split(":")
-            self.addr = addr
-            self.port = int(port)
-        else:
-            self.addr = server
-            self.port = 443
-        self.headers = {"accept": "application/dns-json"}
+    def __init__(self, doh_url: str) -> None:
 
+        self.url = urllib.parse.urlparse(doh_url)
+
+        if(None != self.url.port):
+            self.port = self.url.port
+        else:
+            # it's Dns over HTTPS after all
+            self.port = 443 #
+
+        self.headers = {"accept": "application/dns-json"}
         self.logger = logging.getLogger(DEFAULT_LOGGER)
 
     def __enter__(self) -> Any:
-        self.conn = http.client.HTTPSConnection(self.addr, self.port)
+        self.conn = http.client.HTTPSConnection(str(self.url.hostname),
+                                                self.url.port)
         return self
 
     def __exit__(self, exc_type, exc_value, tb) -> bool:
@@ -80,22 +83,28 @@ class DohConnection():
         info_list: List[DohAnswer] = []
 
         try:
-            url = f"https://{self.addr}/dns-query?name={name}&type={type}"
+            url = f"{self.url.scheme}://{self.url.hostname}"
+            url += f"{self.url.path}?name={name}&type={type}"
             self.conn.request("GET", url, "", self.headers)
             response = self.conn.getresponse()
             json_str = response.read().decode("utf-8")
             response_dict = json.loads(json_str)
 
-            if("Answer" in response_dict):
-                for entry in response_dict["Answer"]:
-                    if(entry["type"] != 1):
-                        continue
-                    e_name = entry["name"]
-                    e_type = entry["type"]
-                    e_ttl = entry["TTL"] + DEFAULT_EXTRA_EXPIRY
-                    e_ip = entry["data"]
-                    answer = DohAnswer(e_name, e_type, e_ttl, e_ip)
-                    info_list.append(answer)
+            if(0 != response_dict["Status"]):
+                return []
+
+            if("Answer" not in response_dict):
+                return []
+
+            for entry in response_dict["Answer"]:
+                if(entry["type"] != 1):
+                    continue
+                e_name = entry["name"]
+                e_type = entry["type"]
+                e_ttl = entry["TTL"] + DEFAULT_EXTRA_EXPIRY
+                e_ip = entry["data"]
+                answer = DohAnswer(e_name, e_type, e_ttl, e_ip)
+                info_list.append(answer)
         except Exception as e:
             self.logger.exception(e)
 
@@ -150,11 +159,11 @@ class DohCache():
 
 class DohRequestThread(threading.Thread):
 
-    def __init__(self, server: str, req_queue: Queue, res_queue: Queue, cache: DohCache) -> None:
+    def __init__(self, doh_url: str, req_queue: Queue, res_queue: Queue, cache: DohCache) -> None:
         self.req_queue = req_queue
         self.res_queue = res_queue
         self.cache = cache
-        self.server = server
+        self.doh_url = doh_url
         self.logger = logging.getLogger(DEFAULT_LOGGER)
         self.quit_signal = False
         super().__init__()
@@ -176,12 +185,22 @@ class DohRequestThread(threading.Thread):
 
         if(len(answers) > 0):
             cached = True
+            delay = 0
         else:
             cached = False
+            pre = time.time()
             answers = con.resolve(qname)
+            delay = 1000 * ( time.time() - pre )
             self.cache.update(qname, answers)
 
-        self.logger.info(f"{qtype:<6} {qname} -> {answers} cached={cached}")
+        log_str = f"{qtype:<6} {qname} -> {answers}"
+
+        if(True == cached):
+            log_str += f" (cached)"
+        else:
+            log_str += f" ({delay:0.2f}ms)"
+
+        self.logger.info(log_str)
 
         if(0 != len(answers)):
             for a in answers:
@@ -195,7 +214,7 @@ class DohRequestThread(threading.Thread):
 
     def run(self) -> None:
 
-        with DohConnection(self.server) as con:
+        with DohConnection(self.doh_url) as con:
             try:
                 while(False == self.quit_signal):
                     (request, client) = self.req_queue.get()
@@ -232,8 +251,8 @@ class DohResponseThread(threading.Thread):
 
 class DohQueue():
 
-    def __init__(self, socket: socket.socket, doh_server: str, thread_count: int) -> None:
-        self.server = doh_server
+    def __init__(self, socket: socket.socket, doh_url: str, thread_count: int) -> None:
+        self.doh_url = doh_url
         self.thread_count = thread_count
         self.threads: List[DohRequestThread] = []
         self.cache = DohCache()
@@ -255,7 +274,7 @@ class DohQueue():
         self.dequeue_thread.start()
 
         for _ in range(self.thread_count):
-            t = DohRequestThread(self.server, self.req_queue,
+            t = DohRequestThread(self.doh_url, self.req_queue,
                                  self.res_queue, self.cache)
             t.start()
             self.threads.append(t)
@@ -346,11 +365,11 @@ def main() -> int:
                         help=f"Listening address. Default: {DEFAULT_ADDR}")
 
     parser.add_argument("-s",
-                        "--doh-server",
+                        "--doh-url",
                         default=DEFAULT_DOH,
                         type=str,
                         required=False,
-                        help=f"DoH server. Default: {DEFAULT_DOH}")
+                        help=f"DoH URL. Default: {DEFAULT_DOH}")
 
     parser.add_argument("--resolver-threads",
                         default=DEFAULT_RESOLVERS,
@@ -384,7 +403,7 @@ def main() -> int:
 
     try:
         with DnsServer((args.addr, args.port),
-                       args.doh_server,
+                       args.doh_url,
                        args.resolver_threads) as server:
             server.loop()
         status = 0
