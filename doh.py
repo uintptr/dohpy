@@ -12,11 +12,10 @@ import json
 import time
 import logging
 import errno
-from multiprocessing import Queue
-from typing import List, Tuple, Any, Dict
 import threading
-from threading import Lock, Event
 
+from typing import List, Tuple, Any, Dict
+from queue import Queue
 
 try:
     from dnslib import DNSRecord, QTYPE, DNSHeader, RR, A
@@ -27,8 +26,13 @@ except ImportError:
 DEFAULT_DOH = "dns.quad9.net:5053"
 DEFAULT_PORT = 5053
 DEFAULT_ADDR = "0.0.0.0"
-DEFAULT_RESOLVERS = 10
+DEFAULT_RESOLVERS = 20
 DEFAULT_LOGGER = "doh"
+#
+# Some have meme level expiry values and makes caching somewhat irrelevant.
+# Adding a few hours so we don't have to request the doh server that often
+#
+DEFAULT_EXTRA_EXPIRY = (5 * 3600)
 
 
 @dataclass
@@ -41,9 +45,6 @@ class DohAnswer():
 
     def __repr__(self) -> str:
         return f"{self.ip}"
-
-    def __str__(self) -> str:
-        return "hello"
 
 
 class DohConnection():
@@ -91,12 +92,7 @@ class DohConnection():
                         continue
                     e_name = entry["name"]
                     e_type = entry["type"]
-                    #
-                    # Adding an hour for TTL. Some are using very small
-                    # value and it doesn't make sense to ask the server
-                    # that often
-                    #
-                    e_ttl = entry["TTL"] + 3600
+                    e_ttl = entry["TTL"] + DEFAULT_EXTRA_EXPIRY
                     e_ip = entry["data"]
                     answer = DohAnswer(e_name, e_type, e_ttl, e_ip)
                     info_list.append(answer)
@@ -106,29 +102,10 @@ class DohConnection():
         return info_list
 
 
-class ResolveItem():
-
-    name: str = ""
-    answers: List[DohAnswer]
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-        self.event = Event()
-
-    def signal(self) -> None:
-        self.event.set()
-
-    def wait(self, timeout=10) -> bool:
-        return self.event.wait(timeout=timeout)
-
-    def __str__(self) -> str:
-        return f"{self.name}"
-
-
 class DohCache():
 
     def __init__(self) -> None:
-        self.mutex = Lock()
+        self.mutex = threading.Lock()
         self.cache: Dict[str, List[DohAnswer]] = {}
         self.logger = logging.getLogger(DEFAULT_LOGGER)
 
@@ -149,7 +126,7 @@ class DohCache():
                 if(False == self._expired(self.cache[name])):
                     return self.cache[name]
                 else:
-                    self.logger.info(f"{name} is expired")
+                    self.logger.info(f"{name} expired")
                     del self.cache[name]
 
         finally:
@@ -297,9 +274,6 @@ class DohQueue():
 
         self.dequeue_thread.join()
 
-        self.req_queue.close()
-        self.res_queue.close()
-
         if(None != exc_value):
             raise exc_value
 
@@ -334,18 +308,17 @@ class DnsServer():
         try:
             with DohQueue(self.socket, self.server, self.thread_count) as q:
                 while(True):
-                    r, _, _ = select.select([self.socket], [], [], 5)
+                    r, _, _ = select.select([self.socket], [], [])
                     if(len(r) > 0):
                         data, client = self.socket.recvfrom(4096)
                         if(len(data) > 0):
-                            try:
-                                q.put(data, client)
-                            except Exception as e:
-                                self.logger.exception(e)
+                            #
+                            # Response will be issued by a thread. We
+                            # don't have to worry about it here
+                            #
+                            q.put(data, client)
                         else:
-                            pass  # Nothing to read
-                    else:
-                        pass  # Probably a timeout
+                            pass  # Nothing to read. Is this fatal ?
         except Exception as e:
             self.logger.exception(e)
         except KeyboardInterrupt:
@@ -385,6 +358,11 @@ def main() -> int:
                         required=False,
                         help=f"Resolver threads Default: {DEFAULT_RESOLVERS}")
 
+    parser.add_argument("-v",
+                        "--verbose",
+                        action="store_true",
+                        help="Log to stdout")
+
     args = parser.parse_args()
 
     logfile = os.path.dirname(sys.argv[0])
@@ -398,11 +376,12 @@ def main() -> int:
                         level=logging.DEBUG)
 
     logger = logging.getLogger(DEFAULT_LOGGER)
+
+    if(True == args.verbose):
+        logger.addHandler(logging.StreamHandler(sys.stdout))
+
     logger.info("Server started")
 
-    #
-    # Work
-    #
     try:
         with DnsServer((args.addr, args.port),
                        args.doh_server,
