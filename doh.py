@@ -26,7 +26,7 @@ except ImportError:
 
 DEFAULT_DOH = "https://dns.quad9.net:5053/dns-query"
 DEFAULT_PORT = 5053
-DEFAULT_ADDR = "0.0.0.0"
+DEFAULT_ADDR = "127.0.0.1"
 DEFAULT_RESOLVERS = 20
 DEFAULT_LOGGER = "doh"
 #
