@@ -134,12 +134,16 @@ class DohConnection():
                 answers = self._resolve_name(name, type)
                 success = True
             except http.client.CannotSendRequest:
-                self.logger.info("connection died")
+                self.logger.info("Can't send request")
+            except http.client.RemoteDisconnected:
+                self.logger.info("Remote server disconnected")
             except TimeoutError:
-                self.logger.info("connection timed out")
+                self.logger.info("Connection timed out")
             except OSError as e:
                 if(errno.ENETUNREACH == e.errno):
-                    self.logger.info(f"Unable to connect to {hostname}")
+                    self.logger.info(f"{hostname} is not reachable")
+                elif(errno.ECONNRESET == e.errno):
+                    self.logger.info(f"Server resetted the connection")
                 else:
                     self.logger.exception(e)
             except Exception as e:
