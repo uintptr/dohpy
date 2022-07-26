@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
+from ast import expr_context
 from dataclasses import dataclass
+from sqlite3 import Time
 
 import sys
 import os
@@ -24,16 +26,23 @@ except ImportError:
     print("dnslib is missing")
     sys.exit(1)
 
+VERSION_STR = "0.1"
 DEFAULT_DOH = "https://dns.quad9.net:5053/dns-query"
 DEFAULT_PORT = 5053
 DEFAULT_ADDR = "127.0.0.1"
 DEFAULT_RESOLVERS = 20
 DEFAULT_LOGGER = "doh"
+
 #
 # Some have meme level expiry values and makes caching somewhat irrelevant.
 # Adding a few hours so we don't have to request the doh server that often
 #
 DEFAULT_EXTRA_EXPIRY = (5 * 3600)
+
+
+def printkv(n, v) -> None:
+    name = f"{n}:"
+    print(f"    {name:<20} {v}")
 
 
 @dataclass
@@ -58,14 +67,17 @@ class DohConnection():
             self.port = self.url.port
         else:
             # it's Dns over HTTPS after all
-            self.port = 443 #
+            self.port = 443
 
         self.headers = {"accept": "application/dns-json"}
         self.logger = logging.getLogger(DEFAULT_LOGGER)
 
+    def _connect(self) -> http.client.HTTPSConnection:
+        server = str(self.url.hostname)
+        return http.client.HTTPSConnection(server, self.url.port, timeout=5)
+
     def __enter__(self) -> Any:
-        self.conn = http.client.HTTPSConnection(str(self.url.hostname),
-                                                self.url.port)
+        self.conn = self._connect()
         return self
 
     def __exit__(self, exc_type, exc_value, tb) -> bool:
@@ -78,37 +90,71 @@ class DohConnection():
 
         return True
 
+    def _resolve_name(self, name: str, type: str = "A") -> List[DohAnswer]:
+        answers: List[DohAnswer] = []
+
+        url = f"{self.url.scheme}://{self.url.hostname}"
+        url += f"{self.url.path}?name={name}&type={type}"
+        self.conn.request("GET", url, "", self.headers)
+        response = self.conn.getresponse()
+        json_str = response.read().decode("utf-8")
+        response_dict = json.loads(json_str)
+
+        if(0 != response_dict["Status"]):
+            return []
+
+        status = response_dict["Status"]
+
+        if(0 != status):
+            self.logger.info(f"{name} status={status}")
+
+        if("Answer" not in response_dict):
+            return []
+
+        for entry in response_dict["Answer"]:
+            if(entry["type"] != 1):
+                continue
+            e_name = entry["name"]
+            e_type = entry["type"]
+            e_ttl = entry["TTL"] + DEFAULT_EXTRA_EXPIRY
+            e_ip = entry["data"]
+            answer = DohAnswer(e_name, e_type, e_ttl, e_ip)
+            answers.append(answer)
+
+        return answers
+
+    def _resolve_loop(self, name: str, type: str = "A") -> List[DohAnswer]:
+        answers: List[DohAnswer] = []
+        attempts = 3
+        success = False
+        hostname = self.url.hostname
+
+        while(False == success and attempts > 0):
+            try:
+                answers = self._resolve_name(name, type)
+                success = True
+            except http.client.CannotSendRequest:
+                self.logger.info("connection died")
+            except TimeoutError:
+                self.logger.info("connection timed out")
+            except OSError as e:
+                if(errno.ENETUNREACH == e.errno):
+                    self.logger.info(f"Unable to connect to {hostname}")
+                else:
+                    self.logger.exception(e)
+            except Exception as e:
+                self.logger.exception(e)
+            finally:
+                if(False == success):
+                    attempts -= 1
+                    self.logger.info(f"reconnecting to {hostname}")
+                    self.conn.close()
+                    self.conn = self._connect()
+
+        return answers
+
     def resolve(self, name: str, type: str = "A") -> List[DohAnswer]:
-
-        info_list: List[DohAnswer] = []
-
-        try:
-            url = f"{self.url.scheme}://{self.url.hostname}"
-            url += f"{self.url.path}?name={name}&type={type}"
-            self.conn.request("GET", url, "", self.headers)
-            response = self.conn.getresponse()
-            json_str = response.read().decode("utf-8")
-            response_dict = json.loads(json_str)
-
-            if(0 != response_dict["Status"]):
-                return []
-
-            if("Answer" not in response_dict):
-                return []
-
-            for entry in response_dict["Answer"]:
-                if(entry["type"] != 1):
-                    continue
-                e_name = entry["name"]
-                e_type = entry["type"]
-                e_ttl = entry["TTL"] + DEFAULT_EXTRA_EXPIRY
-                e_ip = entry["data"]
-                answer = DohAnswer(e_name, e_type, e_ttl, e_ip)
-                info_list.append(answer)
-        except Exception as e:
-            self.logger.exception(e)
-
-        return info_list
+        return self._resolve_loop(name, type)
 
 
 class DohCache():
@@ -159,14 +205,14 @@ class DohCache():
 
 class DohRequestThread(threading.Thread):
 
-    def __init__(self, doh_url: str, req_queue: Queue, res_queue: Queue, cache: DohCache) -> None:
+    def __init__(self, doh_url: str, req_queue: Queue, res_queue: Queue, cache: DohCache, name=None) -> None:
         self.req_queue = req_queue
         self.res_queue = res_queue
         self.cache = cache
         self.doh_url = doh_url
         self.logger = logging.getLogger(DEFAULT_LOGGER)
         self.quit_signal = False
-        super().__init__()
+        super().__init__(name=name)
 
     def signal_quit(self) -> None:
         self.quit_signal = True
@@ -190,7 +236,7 @@ class DohRequestThread(threading.Thread):
             cached = False
             pre = time.time()
             answers = con.resolve(qname)
-            delay = 1000 * ( time.time() - pre )
+            delay = 1000 * (time.time() - pre)
             self.cache.update(qname, answers)
 
         log_str = f"{qtype:<6} {qname} -> {answers}"
@@ -234,7 +280,7 @@ class DohResponseThread(threading.Thread):
         self.queue = res_queue
         self.socket = socket
         self.logger = logging.getLogger(DEFAULT_DOH)
-        super().__init__()
+        super().__init__(name="response")
 
     def run(self) -> None:
 
@@ -273,9 +319,10 @@ class DohQueue():
         self.dequeue_thread = DohResponseThread(self.socket, self.res_queue)
         self.dequeue_thread.start()
 
-        for _ in range(self.thread_count):
+        for i in range(self.thread_count):
+            name = f"resolver_{i}"
             t = DohRequestThread(self.doh_url, self.req_queue,
-                                 self.res_queue, self.cache)
+                                 self.res_queue, self.cache, name=name)
             t.start()
             self.threads.append(t)
         return self
@@ -384,13 +431,20 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    print(f"dohpy v{VERSION_STR}")
+    printkv("Listening Address", args.addr)
+    printkv("Listening Port", args.port)
+    printkv("DOH URL", args.doh_url)
+    printkv("# Threads", args.resolver_threads)
+    printkv("Verbose", args.verbose)
+
     logfile = os.path.dirname(sys.argv[0])
     logfile = os.path.abspath(logfile)
     logfile = os.path.join(logfile, "doh.log")
 
     logging.basicConfig(filename=logfile,
                         filemode='a',
-                        format='%(asctime)s %(message)s',
+                        format='%(asctime)s %(threadName)-15s %(message)s',
                         datefmt='%H:%M:%S',
                         level=logging.DEBUG)
 
