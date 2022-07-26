@@ -144,6 +144,8 @@ class DohConnection():
                     self.logger.info(f"{hostname} is not reachable")
                 elif(errno.ECONNRESET == e.errno):
                     self.logger.info(f"Server resetted the connection")
+                elif(errno.EPIPE == e.errno):
+                    self.logger.info(f"Broken pipe")
                 else:
                     self.logger.exception(e)
             except Exception as e:
