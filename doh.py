@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 
-from ast import expr_context
 from dataclasses import dataclass
-from sqlite3 import Time
-
 import sys
 import os
 import argparse
@@ -16,6 +13,7 @@ import logging
 import errno
 import threading
 import urllib.parse
+import pwd
 
 from typing import List, Tuple, Any, Dict
 from queue import Queue
@@ -38,6 +36,10 @@ DEFAULT_LOGGER = "doh"
 # Adding a few hours so we don't have to request the doh server that often
 #
 DEFAULT_EXTRA_EXPIRY = (5 * 3600)
+
+
+class DohPermissionDenied(Exception):
+    pass
 
 
 def printkv(n, v) -> None:
@@ -143,9 +145,9 @@ class DohConnection():
                 if(errno.ENETUNREACH == e.errno):
                     self.logger.info(f"{hostname} is not reachable")
                 elif(errno.ECONNRESET == e.errno):
-                    self.logger.info(f"Server resetted the connection")
+                    self.logger.info("Server resetted the connection")
                 elif(errno.EPIPE == e.errno):
-                    self.logger.info(f"Broken pipe")
+                    self.logger.info("Broken pipe")
                 else:
                     self.logger.exception(e)
             except Exception as e:
@@ -248,7 +250,7 @@ class DohRequestThread(threading.Thread):
         log_str = f"{qtype:<6} {qname} -> {answers}"
 
         if(True == cached):
-            log_str += f" (cached)"
+            log_str += " (cached)"
         else:
             log_str += f" ({delay:0.2f}ms)"
 
@@ -363,7 +365,8 @@ class DnsServer():
     def __enter__(self) -> Any:
         self.cache = DohCache()
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
+        self.socket.bind(self.addr)
+        self.socket.setblocking(False)
         return self
 
     def __exit__(self, exc_type, exc_value, tb) -> bool:
@@ -373,9 +376,6 @@ class DnsServer():
         return True
 
     def loop(self) -> None:
-
-        self.socket.bind(self.addr)
-        self.socket.setblocking(False)
 
         try:
             with DohQueue(self.socket, self.server, self.thread_count) as q:
@@ -398,10 +398,35 @@ class DnsServer():
             pass
 
 
+def drop_privileges(user='nobody') -> None:
+
+    # If not running as root we have nothing to do
+    if(0 != os.getuid()):
+        return
+
+    # Get the uid/gid from the name
+    pw_entry = pwd.getpwnam(user)
+
+    # Remove group privileges
+    os.setgroups([])
+
+    # Try setting the new uid/gid
+    os.setgid(pw_entry.pw_gid)
+    os.setuid(pw_entry.pw_uid)
+
+    # Ensure a very conservative umask
+    os.umask(0o077)
+
+
 def main() -> int:
     status = 1
 
     parser = argparse.ArgumentParser()
+
+    if("USER" in os.environ):
+        current_user = os.environ["USER"]
+    else:
+        current_user = "nobody"
 
     parser.add_argument("-p",
                         "--port",
@@ -435,6 +460,13 @@ def main() -> int:
                         action="store_true",
                         help="Log to stdout")
 
+    parser.add_argument("-u",
+                        "--user",
+                        default=current_user,
+                        required=False,
+                        type=str,
+                        help=f"Can't run as root. Default: {current_user}")
+
     args = parser.parse_args()
 
     print(f"dohpy v{VERSION_STR}")
@@ -442,6 +474,7 @@ def main() -> int:
     printkv("Listening Port", args.port)
     printkv("DOH URL", args.doh_url)
     printkv("# Threads", args.resolver_threads)
+    printkv("Run as user", args.user)
     printkv("Verbose", args.verbose)
 
     logfile = os.path.dirname(sys.argv[0])
@@ -465,6 +498,7 @@ def main() -> int:
         with DnsServer((args.addr, args.port),
                        args.doh_url,
                        args.resolver_threads) as server:
+            drop_privileges(args.user)
             server.loop()
         status = 0
     except PermissionError:
@@ -474,6 +508,8 @@ def main() -> int:
             print(f"Error: port {args.port} already bound")
         else:
             raise e
+    except DohPermissionDenied as e:
+        print("Error", e)
     return status
 
 
