@@ -223,9 +223,7 @@ def main() -> int:
     except NotImplementedError as e:
         print("Error", e)
     finally:
-        if(False == args.uninstall and 0 != status and 0 == os.getuid()):
-                uninstall(install_root)
-
+        pass
     return status
 
 
