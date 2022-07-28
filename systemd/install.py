@@ -53,14 +53,14 @@ def install_systemd(install_root: str, config: str) -> None:
     shell_exec(f"systemctl start  {SYSTEMD_SERVICE_NAME}.service")
 
 
-def build_systemd_file(install_root: str, script: str, user: str) -> str:
+def build_systemd_file(install_root: str, script: str) -> str:
 
     config = """
 [Unit]
 Description=Dns Over HTTPS (doh.py) Service
 
 [Service]
-ExecStart=__PYTHON3__ __SCRIPT__ -u __USER__
+ExecStart=__PYTHON3__ __SCRIPT__
 WorkingDirectory=__INSTALL_ROOT__
 Restart=on-failure
 
@@ -70,7 +70,6 @@ WantedBy=multi-user.target
 
     config = config.replace("__PYTHON3__", sys.executable)
     config = config.replace("__SCRIPT__", script)
-    config = config.replace("__USER__", user)
     config = config.replace("__INSTALL_ROOT__", install_root)
 
     return config
@@ -121,18 +120,17 @@ def uninstall(install_root: str) -> None:
         shutil.rmtree(install_root)
 
 
-def install(install_root: str, user: str) -> None:
+def install(install_root: str) -> None:
 
     script = os.path.dirname(sys.argv[0])
     script = os.path.join(script, "..", SCRIPT_NAME)
     script = os.path.abspath(script)
 
     printkv("Install Directory", install_root)
-    printkv("Run as", user)
     printkv("Server", script)
 
     # Make sure the user exists and get its user/group id
-    (uid, gid) = get_user_id(user)
+    (uid, gid) = get_user_id("nobody")
 
     # Add the directory if it doesn't exist already
     if(False == os.path.isdir(install_root)):
@@ -148,10 +146,25 @@ def install(install_root: str, user: str) -> None:
     os.chown(out_script, uid, gid)
 
     # Build the systemd script file
-    service_config = build_systemd_file(install_root, out_script, user)
+    service_config = build_systemd_file(install_root, out_script)
 
     # Install systemd config file
     install_systemd(install_root, service_config)
+
+
+def upgrade(install_root: str) -> None:
+
+    script = os.path.dirname(sys.argv[0])
+    script = os.path.join(script, "..", SCRIPT_NAME)
+    script = os.path.abspath(script)
+
+    printkv("Install Directory", install_root)
+
+    # Copy the server script ( doh.py ) and change its owner
+    out_script = os.path.join(install_root, SCRIPT_NAME)
+    shutil.copy2(script, out_script)
+
+    shell_exec(f"systemctl restart {SYSTEMD_SERVICE_NAME}.service")
 
 
 def main() -> int:
@@ -166,16 +179,13 @@ def main() -> int:
                         type=str,
                         help=f"Install Directory. Default: {DEFAULT_ROOT}")
 
-    parser.add_argument("-u",
-                        "--run-as",
-                        default="nobody",
-                        required=False,
-                        type=str,
-                        help="Service won't run as root")
-
     parser.add_argument("--uninstall",
                         action="store_true",
                         help="Uninstall the service")
+
+    parser.add_argument("--upgrade",
+                        action="store_true",
+                        help="Upgrade the service")
 
     args = parser.parse_args()
 
@@ -191,10 +201,12 @@ def main() -> int:
         if(False == is_systemd()):
             raise ConfigurationError("systemd not supported")
 
-        if(False == args.uninstall):
-            install(install_root, args.run_as)
-        else:
+        if(True == args.uninstall):
             uninstall(install_root)
+        elif(True == args.upgrade):
+            upgrade(install_root)
+        else:
+            install(install_root)
         status = 0
     except PermissionError as e:
         print("Error:", e)
