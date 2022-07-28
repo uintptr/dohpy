@@ -179,6 +179,10 @@ def main() -> int:
                         type=str,
                         help=f"Install Directory. Default: {DEFAULT_ROOT}")
 
+    parser.add_argument("--install",
+                        action="store_true",
+                        help="Install the service")
+
     parser.add_argument("--uninstall",
                         action="store_true",
                         help="Uninstall the service")
@@ -201,12 +205,14 @@ def main() -> int:
         if(False == is_systemd()):
             raise ConfigurationError("systemd not supported")
 
-        if(True == args.uninstall):
+        if(True == args.install):
+            install(install_root)
+        elif(True == args.uninstall):
             uninstall(install_root)
         elif(True == args.upgrade):
             upgrade(install_root)
         else:
-            install(install_root)
+            raise NotImplementedError("Missing argument")
         status = 0
     except PermissionError as e:
         print("Error:", e)
@@ -214,9 +220,11 @@ def main() -> int:
         print("Error:", e)
     except subprocess.CalledProcessError as e:
         print("Error:", e)
+    except NotImplementedError as e:
+        print("Error", e)
     finally:
-        if(False == args.uninstall and 0 != status):
-            uninstall(install_root)
+        if(False == args.uninstall and 0 != status and 0 == os.getuid()):
+                uninstall(install_root)
 
     return status
 
