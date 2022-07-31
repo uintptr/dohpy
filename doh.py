@@ -234,6 +234,9 @@ class DohRequestThread(threading.Thread):
         qname = str(request.q.qname)
         qtype = QTYPE[request.q.qtype]
 
+        if(qname.endswith(".arpa.")):
+            return response.pack()
+
         # cahed ?
         answers = self.cache.query(qname)
 
