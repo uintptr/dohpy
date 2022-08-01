@@ -234,7 +234,7 @@ class DohRequestThread(threading.Thread):
         qname = str(request.q.qname)
         qtype = QTYPE[request.q.qtype]
 
-        if(qname.endswith(".arpa.")):
+        if(qname.endswith(".arpa.") or qname.endswith(".local")):
             return response.pack()
 
         # cahed ?
