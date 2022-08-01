@@ -29,7 +29,7 @@ DEFAULT_DOH = "https://dns.quad9.net:5053/dns-query"
 DEFAULT_PORT = 5053
 DEFAULT_ADDR = "127.0.0.1"
 DEFAULT_RESOLVERS = 20
-DEFAULT_LOGGER = "doh"
+DOH_LOGGER_NAME = "doh"
 
 #
 # Some have meme level expiry values and makes caching somewhat irrelevant.
@@ -43,8 +43,11 @@ class DohPermissionDenied(Exception):
 
 
 def printkv(n, v) -> None:
+    logger = logging.getLogger(DOH_LOGGER_NAME)
     name = f"{n}:"
-    print(f"    {name:<20} {v}")
+    line = f"{name:<20} {v}"
+    print("    ", line)
+    logger.info(line)
 
 
 @dataclass
@@ -72,7 +75,7 @@ class DohConnection():
             self.port = 443
 
         self.headers = {"accept": "application/dns-json"}
-        self.logger = logging.getLogger(DEFAULT_LOGGER)
+        self.logger = logging.getLogger(DOH_LOGGER_NAME)
 
     def _connect(self) -> http.client.HTTPSConnection:
         server = str(self.url.hostname)
@@ -170,7 +173,7 @@ class DohCache():
     def __init__(self) -> None:
         self.mutex = threading.Lock()
         self.cache: Dict[str, List[DohAnswer]] = {}
-        self.logger = logging.getLogger(DEFAULT_LOGGER)
+        self.logger = logging.getLogger(DOH_LOGGER_NAME)
 
     def _expired(self, items: List[DohAnswer]) -> bool:
         cur_ts = time.time()
@@ -218,7 +221,7 @@ class DohRequestThread(threading.Thread):
         self.res_queue = res_queue
         self.cache = cache
         self.doh_url = doh_url
-        self.logger = logging.getLogger(DEFAULT_LOGGER)
+        self.logger = logging.getLogger(DOH_LOGGER_NAME)
         self.quit_signal = False
         super().__init__(name=name)
 
@@ -363,7 +366,7 @@ class DnsServer():
         self.addr = addr
         self.server = server
         self.thread_count = thread_count
-        self.logger = logging.getLogger(DEFAULT_LOGGER)
+        self.logger = logging.getLogger(DOH_LOGGER_NAME)
 
     def __enter__(self) -> Any:
         self.cache = DohCache()
@@ -470,7 +473,31 @@ def main() -> int:
                         type=str,
                         help=f"Can't run as root. Default: {current_user}")
 
+    parser.add_argument("--no-logs",
+                        action="store_true",
+                        help="Disable logging.")
+
     args = parser.parse_args()
+
+    logfile = os.path.dirname(sys.argv[0])
+    logfile = os.path.abspath(logfile)
+    logfile = os.path.join(logfile, "doh.log")
+
+    if(True == args.no_logs):
+        logging.basicConfig(format='%(asctime)s %(message)s',
+                            datefmt='%H:%M:%S',
+                            level=logging.CRITICAL)
+    else:
+        logging.basicConfig(filename=logfile,
+                            filemode='a',
+                            format='%(asctime)s %(message)s',
+                            datefmt='%H:%M:%S',
+                            level=logging.DEBUG)
+
+    logger = logging.getLogger(DOH_LOGGER_NAME)
+
+    if(True == args.verbose):
+        logger.addHandler(logging.StreamHandler(sys.stdout))
 
     print(f"dohpy v{VERSION_STR}")
     printkv("Listening Address", args.addr)
@@ -479,21 +506,7 @@ def main() -> int:
     printkv("# Threads", args.resolver_threads)
     printkv("Run as user", args.user)
     printkv("Verbose", args.verbose)
-
-    logfile = os.path.dirname(sys.argv[0])
-    logfile = os.path.abspath(logfile)
-    logfile = os.path.join(logfile, "doh.log")
-
-    logging.basicConfig(filename=logfile,
-                        filemode='a',
-                        format='%(asctime)s %(threadName)-15s %(message)s',
-                        datefmt='%H:%M:%S',
-                        level=logging.DEBUG)
-
-    logger = logging.getLogger(DEFAULT_LOGGER)
-
-    if(True == args.verbose):
-        logger.addHandler(logging.StreamHandler(sys.stdout))
+    printkv("Logging Enabled", False == args.no_logs)
 
     logger.info("Server started")
 
