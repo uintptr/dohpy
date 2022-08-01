@@ -123,7 +123,7 @@ def uninstall(install_root: str) -> None:
 def install(install_root: str) -> None:
 
     script = os.path.dirname(sys.argv[0])
-    script = os.path.join(script, "..", SCRIPT_NAME)
+    script = os.path.join(script, SCRIPT_NAME)
     script = os.path.abspath(script)
 
     printkv("Install Directory", install_root)
@@ -155,7 +155,7 @@ def install(install_root: str) -> None:
 def upgrade(install_root: str) -> None:
 
     script = os.path.dirname(sys.argv[0])
-    script = os.path.join(script, "..", SCRIPT_NAME)
+    script = os.path.join(script, SCRIPT_NAME)
     script = os.path.abspath(script)
 
     printkv("Install Directory", install_root)
