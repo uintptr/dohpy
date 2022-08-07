@@ -56,7 +56,7 @@ class DohAnswer():
     type: int
     ttl: int
     ip: str
-    ts: float = time.time()
+    ts: float
 
     def __repr__(self) -> str:
         return f"{self.ip}"
@@ -123,7 +123,7 @@ class DohConnection():
             e_type = entry["type"]
             e_ttl = entry["TTL"] + DEFAULT_EXTRA_EXPIRY
             e_ip = entry["data"]
-            answer = DohAnswer(e_name, e_type, e_ttl, e_ip)
+            answer = DohAnswer(e_name, e_type, e_ttl, e_ip, time.time())
             answers.append(answer)
 
         return answers
