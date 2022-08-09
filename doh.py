@@ -192,7 +192,6 @@ class DohCache():
                 if(False == self._expired(self.cache[name])):
                     return self.cache[name]
                 else:
-                    self.logger.info(f"{name} expired")
                     del self.cache[name]
 
         finally:
