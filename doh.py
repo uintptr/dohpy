@@ -68,7 +68,7 @@ class DohConnection():
 
         self.url = urllib.parse.urlparse(doh_url)
 
-        if(None != self.url.port):
+        if (None != self.url.port):
             self.port = self.url.port
         else:
             # it's Dns over HTTPS after all
@@ -90,8 +90,8 @@ class DohConnection():
         try:
             self.conn.close()
         finally:
-            if(None != exc_type):
-                raise(exc_value)
+            if (None != exc_type):
+                raise (exc_value)
 
         return True
 
@@ -105,19 +105,19 @@ class DohConnection():
         json_str = response.read().decode("utf-8")
         response_dict = json.loads(json_str)
 
-        if(0 != response_dict["Status"]):
+        if (0 != response_dict["Status"]):
             return []
 
         status = response_dict["Status"]
 
-        if(0 != status):
+        if (0 != status):
             self.logger.info(f"{name} status={status}")
 
-        if("Answer" not in response_dict):
+        if ("Answer" not in response_dict):
             return []
 
         for entry in response_dict["Answer"]:
-            if(entry["type"] != 1):
+            if (entry["type"] != 1):
                 continue
             e_name = entry["name"]
             e_type = entry["type"]
@@ -134,7 +134,7 @@ class DohConnection():
         success = False
         hostname = self.url.hostname
 
-        while(False == success and attempts > 0):
+        while (False == success and attempts > 0):
             try:
                 answers = self._resolve_name(name, type)
                 success = True
@@ -145,18 +145,18 @@ class DohConnection():
             except TimeoutError:
                 self.logger.info("Connection timed out")
             except OSError as e:
-                if(errno.ENETUNREACH == e.errno):
+                if (errno.ENETUNREACH == e.errno):
                     self.logger.info(f"{hostname} is not reachable")
-                elif(errno.ECONNRESET == e.errno):
+                elif (errno.ECONNRESET == e.errno):
                     self.logger.info("Server resetted the connection")
-                elif(errno.EPIPE == e.errno):
+                elif (errno.EPIPE == e.errno):
                     self.logger.info("Broken pipe")
                 else:
                     self.logger.exception(e)
             except Exception as e:
                 self.logger.exception(e)
             finally:
-                if(False == success):
+                if (False == success):
                     attempts -= 1
                     self.logger.info(f"reconnecting to {hostname}")
                     self.conn.close()
@@ -179,7 +179,7 @@ class DohCache():
         cur_ts = time.time()
         expired_ts = items[0].ts + items[0].ttl
 
-        if(expired_ts > cur_ts):
+        if (expired_ts > cur_ts):
             return False
         return True
 
@@ -188,8 +188,8 @@ class DohCache():
         self.mutex.acquire()
 
         try:
-            if(name in self.cache):
-                if(False == self._expired(self.cache[name])):
+            if (name in self.cache):
+                if (False == self._expired(self.cache[name])):
                     return self.cache[name]
                 else:
                     del self.cache[name]
@@ -204,10 +204,10 @@ class DohCache():
         self.mutex.acquire()
 
         try:
-            if(len(answers) > 0):
+            if (len(answers) > 0):
                 self.cache[name] = answers
             else:
-                if(name in self.cache):
+                if (name in self.cache):
                     del self.cache[name]
         finally:
             self.mutex.release()
@@ -236,13 +236,13 @@ class DohRequestThread(threading.Thread):
         qname = str(request.q.qname)
         qtype = QTYPE[request.q.qtype]
 
-        if(qname.endswith(".arpa.") or qname.endswith(".local")):
+        if (qname.endswith(".arpa.") or qname.endswith(".local")):
             return response.pack()
 
         # cahed ?
         answers = self.cache.query(qname)
 
-        if(len(answers) > 0):
+        if (len(answers) > 0):
             cached = True
             delay = 0
         else:
@@ -254,14 +254,14 @@ class DohRequestThread(threading.Thread):
 
         log_str = f"{qtype:<6} {qname} -> {answers}"
 
-        if(True == cached):
+        if (True == cached):
             log_str += " (cached)"
         else:
             log_str += f" ({delay:0.2f}ms)"
 
         self.logger.info(log_str)
 
-        if(0 != len(answers)):
+        if (0 != len(answers)):
             for a in answers:
                 responde_data = RR(qname,
                                    rtype=a.type,
@@ -275,9 +275,9 @@ class DohRequestThread(threading.Thread):
 
         with DohConnection(self.doh_url) as con:
             try:
-                while(False == self.quit_signal):
+                while (False == self.quit_signal):
                     (request, client) = self.req_queue.get()
-                    if(None != request):
+                    if (None != request):
                         response = self._process_query(con, request)
                         self.res_queue.put((response, client))
                     else:
@@ -297,11 +297,11 @@ class DohResponseThread(threading.Thread):
 
     def run(self) -> None:
 
-        while(True):
+        while (True):
             try:
                 (response, client) = self.queue.get()
 
-                if(None == response):
+                if (None == response):
                     break
                 self.socket.sendto(response, client)
             except Exception as e:
@@ -353,7 +353,7 @@ class DohQueue():
 
         self.dequeue_thread.join()
 
-        if(None != exc_value):
+        if (None != exc_value):
             raise exc_value
 
         return True
@@ -376,7 +376,7 @@ class DnsServer():
 
     def __exit__(self, exc_type, exc_value, tb) -> bool:
         self.socket.close()
-        if(None != exc_type):
+        if (None != exc_type):
             raise exc_value
         return True
 
@@ -384,11 +384,11 @@ class DnsServer():
 
         try:
             with DohQueue(self.socket, self.server, self.thread_count) as q:
-                while(True):
+                while (True):
                     r, _, _ = select.select([self.socket], [], [])
-                    if(len(r) > 0):
+                    if (len(r) > 0):
                         data, client = self.socket.recvfrom(4096)
-                        if(len(data) > 0):
+                        if (len(data) > 0):
                             #
                             # Response will be issued by a thread. We
                             # don't have to worry about it here
@@ -406,7 +406,7 @@ class DnsServer():
 def drop_privileges(user='nobody') -> None:
 
     # If not running as root we have nothing to do
-    if(0 != os.getuid()):
+    if (0 != os.getuid()):
         return
 
     # Get the uid/gid from the name
@@ -428,7 +428,7 @@ def main() -> int:
 
     parser = argparse.ArgumentParser()
 
-    if("USER" in os.environ):
+    if ("USER" in os.environ):
         current_user = os.environ["USER"]
     else:
         current_user = "nobody"
@@ -482,7 +482,7 @@ def main() -> int:
     logfile = os.path.abspath(logfile)
     logfile = os.path.join(logfile, "doh.log")
 
-    if(True == args.no_logs):
+    if (True == args.no_logs):
         logging.basicConfig(format='%(asctime)s %(message)s',
                             datefmt='%H:%M:%S',
                             level=logging.CRITICAL)
@@ -495,7 +495,7 @@ def main() -> int:
 
     logger = logging.getLogger(DOH_LOGGER_NAME)
 
-    if(True == args.verbose):
+    if (True == args.verbose):
         logger.addHandler(logging.StreamHandler(sys.stdout))
 
     print(f"dohpy v{VERSION_STR}")
@@ -519,7 +519,7 @@ def main() -> int:
     except PermissionError:
         print(f"Error: Permission failure binding port {args.port}")
     except OSError as e:
-        if(errno.EADDRINUSE == e.errno):
+        if (errno.EADDRINUSE == e.errno):
             print(f"Error: port {args.port} already bound")
         else:
             raise e
@@ -531,5 +531,5 @@ def main() -> int:
 if __name__ == '__main__':
     status = main()
 
-    if(0 != status):
+    if (0 != status):
         sys.exit(status)
